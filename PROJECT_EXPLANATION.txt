@@ -1,0 +1,362 @@
+ ================================================================================
+        NETWORK TRAFFIC ANALYZER & REAL-TIME ANOMALY DETECTOR (MINI IDS)
+                      Comprehensive Project & Networking Guide
+================================================================================
+
+1. WHAT THE PROJECT IS
+--------------------------------------------------------------------------------
+This project is a lightweight, real-time Network Traffic Analyzer and Mini
+Intrusion Detection System (IDS). It sits passively on a computer's network 
+interface card (NIC), observes every data packet passing through the local 
+network, extracts structural networking information from Layer 2 to Layer 4, 
+computes real-time bandwidth and protocol metrics, and deterministically detects
+three major network attacks:
+  1. TCP Port Scanning (Network Reconnaissance)
+  2. TCP SYN Flood (Denial of Service - DoS)
+  3. ARP Cache Poisoning / Spoofing (Man-in-the-Middle - MitM prerequisite)
+
+It displays all metrics, top talker hosts, live throughput graphs, and alert 
+details on a live, browser-based cybersecurity operations dashboard updated 
+every second via WebSockets.
+
+
+2. WHAT THE PROJECT DOES
+--------------------------------------------------------------------------------
+1. Passive Packet Capture:
+   Captures network frames without injecting packets, altering data, or 
+   disrupting active network connections.
+
+2. L2-L4 Protocol Dissection & Classification:
+   Deconstructs raw byte streams into Ethernet frames, ARP requests/replies, 
+   IPv4/IPv6 packets, TCP segments (with individual flag decoding), UDP 
+   datagrams, and ICMP/ICMPv6 diagnostic messages.
+
+3. Zero-Payload Header Inspection:
+   Adheres to strict privacy and efficiency standards by parsing only header 
+   metadata (MAC addresses, IP addresses, ports, protocol types, TCP flags, 
+   and frame lengths). Application-layer raw payloads (HTTP bodies, credentials, 
+   file bytes) are instantly discarded and never stored or transmitted.
+
+4. Real-Time Rolling Throughput & Metric Aggregation:
+   Tracks total session volume, per-protocol distributions, and moving 
+   60-second throughput (bytes per second and packets per second).
+
+5. Host Directionality & "Top Talkers" Tracking:
+   Identifies all active IP endpoints on the subnet, tracking transmitted (TX) 
+   and received (RX) traffic separately to compute individual upload and 
+   download rates.
+
+6. Deterministic Anomaly Detection & Alerting:
+   Continuously evaluates captured metadata against sliding-window heuristics 
+   to identify abnormal patterns. Generated alerts include structured forensic 
+   evidence and can be acknowledged by an operator.
+
+7. Live Streaming Web Dashboard:
+   Streams 1-second system snapshots via WebSockets to an interactive web 
+   interface with KPI cards, throughput charts, host tables, and packet 
+   inspectors.
+
+
+3. SYSTEM ARCHITECTURE & DATA FLOW PIPELINE
+--------------------------------------------------------------------------------
+The system is divided into two primary subsystems: a high-performance Python 
+backend and an interactive web frontend.
+
++--------------------------------------------------------------------------+
+| 1. PHYSICAL / VIRTUAL NETWORK INTERFACE (NIC)                            |
+|    (en0, eth0, wlan0, or Mininet virtual interfaces)                     |
++------------------------------------+-------------------------------------+
+                                     | Raw Network Frames
+                                     v
++--------------------------------------------------------------------------+
+| 2. CAPTURE ENGINE (CaptureManager via Scapy AsyncSniffer)                 |
+|    - Operates in promiscuous mode (store=False, zero disk footprint)     |
+|    - Runs on an asynchronous background thread                           |
++------------------------------------+-------------------------------------+
+                                     | Raw Scapy Packet Object
+                                     v
++--------------------------------------------------------------------------+
+| 3. PURE PACKET PARSER (PacketParser)                                     |
+|    - Extracts L2 (Ethernet/ARP), L3 (IP/ICMP), L4 (TCP/UDP) headers      |
+|    - Strips all application-layer payloads (Zero-Payload Policy)         |
+|    - Assigns monotonic IDs and UTC timestamps                            |
++------------------------------------+-------------------------------------+
+                                     | Immutable "PacketObservation"
+                  +------------------+------------------+
+                  |                                     |
+                  v                                     v
++------------------------------------+ +-----------------------------------+
+| 4. METRICS STORE (MetricsStore)    | | 5. DETECTION ENGINE               |
+|    - Tracks session totals         | |    - Rule A: Port Scan Detector   |
+|    - Computes protocol breakdown   | |    - Rule B: SYN Flood Detector   |
+|    - Rolling 60s window throughput | |    - Rule C: ARP Spoof Detector   |
+|    - Host TX/RX talker statistics  | +-----------------+-----------------+
+|    - Bounded 100-packet ring buffer|                   | Anomaly Alert
++-----------------+------------------+                   v
+                  |                    +-----------------------------------+
+                  |                    | 6. ALERT STORE (AlertStore)       |
+                  |                    |    - Deduplication (30s cooldown) |
+                  |                    |    - JSON forensic evidence       |
+                  |                    |    - Bounded FIFO (500 max)       |
+                  |                    +-----------------+-----------------+
+                  +------------------+-------------------+
+                                     |
+                                     v
++--------------------------------------------------------------------------+
+| 7. FASTAPI WEBSERVER & WEBSOCKET ENGINE                                  |
+|    - REST API: /api/capture, /api/metrics, /api/alerts, /api/packets     |
+|    - WebSocket (/ws/live): Broadcasts aggregated snapshots every 1.0s    |
++------------------------------------+-------------------------------------+
+                                     | JSON WebSocket Stream
+                                     v
++--------------------------------------------------------------------------+
+| 8. REACT + TYPESCRIPT DASHBOARD                                          |
+|    - Live KPIs, Recharts throughput graphs, Top Talkers host table       |
+|    - Recent packet header inspector & Anomaly Alert Drawer               |
++--------------------------------------------------------------------------+
+
+
+4. COMPUTER NETWORKS (CN) DEEP DIVE: OSI & TCP/IP MAPPING
+--------------------------------------------------------------------------------
+To understand how this analyzer functions, we examine how it interacts with 
+each layer of the TCP/IP network stack:
+
+A. LAYER 2: DATA LINK LAYER (Frames, MACs, & ARP)
+   -----------------------------------------------------------------------------
+   * Physical Addressing:
+     At Layer 2, units of data are called "Frames". The parser reads the 
+     Ethernet II frame header to extract the 48-bit Source MAC and Destination 
+     MAC addresses (e.g., 00:1a:2b:3c:4d:5e).
+
+   * Promiscuous Mode:
+     Normally, a NIC discards any frame whose destination MAC does not match 
+     its own hardware address (or the broadcast address ff:ff:ff:ff:ff:ff). 
+     Our capture engine instructs the OS kernel driver to enter "Promiscuous 
+     Mode", allowing the analyzer to observe all frames passing across the 
+     physical wire or virtual bridge.
+
+   * Address Resolution Protocol (ARP - RFC 826):
+     ARP operates between Layer 2 and Layer 3. Its role is to resolve known 
+     Layer 3 IPv4 addresses into Layer 2 physical MAC addresses.
+     - An ARP Request asks: "Who has IP 10.0.0.2? Tell 10.0.0.1." (Sent to L2 
+       broadcast ff:ff:ff:ff:ff:ff).
+     - An ARP Reply responds: "10.0.0.2 is at MAC 00:11:22:33:44:55." (Sent as 
+       unicast).
+     The analyzer parses `arp.psrc` (Sender IP), `arp.hwsrc` (Sender MAC), 
+     and `arp.pdst` (Target IP).
+
+B. LAYER 3: NETWORK LAYER (Logical Addressing & Routing)
+   -----------------------------------------------------------------------------
+   * IPv4 (Internet Protocol version 4 - RFC 791):
+     The parser extracts the 32-bit Source IP and Destination IP, Total Packet 
+     Length (in bytes), and the Protocol identifier field to determine what 
+     transport protocol is encapsulated within.
+
+   * IPv6 (Internet Protocol version 6 - RFC 8200):
+     Supports 128-bit addresses (e.g., fe80::1). The parser inspects the IPv6 
+     "Next Header" field to identify encapsulated TCP, UDP, or ICMPv6 packets.
+
+   * ICMP & ICMPv6 (Internet Control Message Protocol - RFC 792 / 4443):
+     Used for network diagnostics and error reporting. Common messages include 
+     Echo Request (ping type 8) and Echo Reply (ping type 0). The parser 
+     classifies ICMP traffic without mistaking it for transport data.
+
+C. LAYER 4: TRANSPORT LAYER (Ports, Multiplexing, & TCP State Flags)
+   -----------------------------------------------------------------------------
+   * Port Addressing & Multiplexing:
+     Layer 4 introduces 16-bit port numbers (0 to 65535). Ports allow an 
+     operating system to multiplex network streams among different applications 
+     (e.g., Port 80 for HTTP, Port 443 for HTTPS, Port 53 for DNS).
+
+   * UDP (User Datagram Protocol - RFC 768):
+     Connectionless, lightweight, and unreliable. The parser extracts Source 
+     Port, Destination Port, and Datagram Length.
+
+   * TCP (Transmission Control Protocol - RFC 793) & The 3-Way Handshake:
+     Connection-oriented and reliable. Establishing a standard TCP connection 
+     requires a Three-Way Handshake:
+       1. Client -> Server: SYN  (Synchronize sequence numbers)
+       2. Server -> Client: SYN + ACK (Acknowledge client SYN, send server SYN)
+       3. Client -> Server: ACK  (Acknowledge server SYN; connection ESTABLISHED)
+
+   * Decoding TCP Control Flags:
+     A standard TCP header contains an 8-bit or 9-bit flags field. The parser 
+     uses bitmask arithmetic to extract these flags:
+       - SYN (0x02): Synchronize flag. Initiates a connection.
+       - ACK (0x10): Acknowledgment flag. Confirms receipt of data or SYN.
+       - FIN (0x01): Finish flag. Gracefully terminates a connection.
+       - RST (0x04): Reset flag. Abruptly aborts a connection or rejects a port.
+       - PSH (0x08): Push flag. Instructs receiver to push data to app immediately.
+       - URG (0x20): Urgent flag. Indicates urgent out-of-band data.
+
+     In our analyzer:
+       `tcp_syn = bool(flags_int & 0x02)`
+       `tcp_ack = bool(flags_int & 0x10)`
+     A "Bare SYN" packet is defined as `tcp_syn == True and tcp_ack == False`. 
+     Bare SYNs represent unestablished connection attempts and are the primary 
+     building blocks for reconnaissance scans and flood attacks.
+
+
+5. HOW THE THREE NETWORK ANOMALIES WORK (CN PERSPECTIVE)
+--------------------------------------------------------------------------------
+
+ANOMALY 1: TCP PORT SCAN (NETWORK RECONNAISSANCE)
+-------------------------------------------------
+* What is happening on the wire:
+  An attacker (such as an Nmap scanner) wants to discover what network services 
+  are running on a target host. In a "TCP SYN Stealth Scan" (Half-Open Scan), 
+  the scanner sends bare SYN packets to dozens or hundreds of different 
+  destination ports (e.g., 21, 22, 23, 25, 80, 443, 8080) on the target IP.
+  - If a port is OPEN, the target replies with SYN+ACK. (The attacker sends 
+    RST to avoid completing the handshake).
+  - If a port is CLOSED, the target replies with RST.
+
+* How the Analyzer Detects It:
+  1. Filters for bare TCP SYNs (`SYN=1, ACK=0`).
+  2. Groups observations by pair: `(Source IP, Target IP)`.
+  3. Maintains a rolling 10-second deque of timestamped destination ports.
+  4. Drops any entries older than 10 seconds.
+  5. Computes the count of DISTINCT destination ports probed in that window. 
+     (Repeated probes to the exact same port do not increment this count, 
+     preventing false positives from repeated retries).
+  6. Trigger: If distinct destination ports >= 15 within 10 seconds, an alert 
+     `PORT_SCAN` is fired with evidence listing the probed ports.
+
+ANOMALY 2: TCP SYN FLOOD (DENIAL OF SERVICE - DoS)
+---------------------------------------------------
+* What is happening on the wire:
+  In an operating system's network stack, when a server receives a TCP SYN, it 
+  allocates a small data structure in memory called a "Transmission Control 
+  Block" (TCB) inside its "SYN Backlog Queue", replies with SYN+ACK, and waits 
+  for the final ACK.
+  In a SYN Flood attack, an attacker blasts thousands of bare SYN packets at 
+  the target server without ever returning the final ACK (often using spoofed 
+  source IP addresses). The server's SYN Backlog Queue fills up completely. 
+  When legitimate users attempt to connect, the server drops their SYN packets 
+  because its queue is exhausted.
+
+* How the Analyzer Detects It:
+  1. Filters for bare TCP SYNs (`SYN=1, ACK=0`).
+  2. Groups observations strictly by `Target IP` (aggregating across all 
+     sources, which detects distributed or IP-spoofed floods).
+  3. Maintains a rolling 5-second deque of packet arrival timestamps.
+  4. Drops entries older than 5 seconds.
+  5. Trigger: If the total number of bare SYNs directed at a single destination 
+     IP meets or exceeds 100 packets within 5 seconds, an alert `SYN_FLOOD` 
+     is fired with the observed count and number of distinct sources.
+
+ANOMALY 3: ARP CACHE POISONING / SPOOFING (MAN-IN-THE-MIDDLE)
+-------------------------------------------------------------
+* What is happening on the wire:
+  ARP is a stateless and trust-based protocol. Operating systems update their 
+  internal ARP Cache (IP-to-MAC translation table) whenever an ARP reply is 
+  seen, even if they never sent a request (Gratuitous ARP).
+  In an ARP Spoofing attack, an attacker on the local subnet sends forged ARP 
+  packets claiming: "The IP of the Default Gateway (10.0.0.1) is at the 
+  Attacker's MAC address (02:00:00:aa:bb:02)". The victim machine updates its 
+  ARP table with the attacker's MAC. Subsequently, all internet-bound frames 
+  from the victim are sent directly to the attacker's NIC, enabling 
+  eavesdropping, credential theft, and packet tampering (Man-in-the-Middle).
+
+* How the Analyzer Detects It:
+  1. Inspects all ARP frames for valid sender IP and sender MAC addresses 
+     (ignoring broadcast `0.0.0.0` or `ff:ff:ff:ff:ff:ff`).
+  2. Tracks an IP-to-MAC mapping history over a rolling 60-second window.
+  3. Trigger: If a sender IP is claimed by a MAC address that is DIFFERENT 
+     from the MAC address observed for that same IP within the last 60 seconds, 
+     an alert `ARP_SPOOF` is fired immediately.
+  4. Evidence records the claimed IP, prior MAC, and the conflicting new MAC.
+
+
+6. NETWORK METRICS & CALCULATION METHODOLOGY
+--------------------------------------------------------------------------------
+
+A. BANDWIDTH VS. THROUGHPUT
+   * Bandwidth is the maximum theoretical capacity of the link (e.g., 1 Gbps).
+   * Throughput is the actual volume of data successfully transmitted over 
+     the wire per unit of time (e.g., 2.4 MB/s). The analyzer measures active 
+     throughput.
+
+B. ROLLING WINDOW RATE VS. CUMULATIVE AVERAGE
+   * Many basic tools compute throughput by taking `total_session_bytes / uptime`. 
+     This is mathematically flawed: if a network transferred 100 MB in the first 
+     minute and then was silent for an hour, the average rate would slowly decay 
+     toward zero, failing to show the current silence.
+   * Our Analyzer uses a true "Sliding Window" algorithm:
+       - Only packets captured in the last `T` seconds (default 60s) count toward 
+         the current rate.
+       - `bytes_per_second = sum(bytes_in_window) / effective_window_seconds`
+       - `packets_per_second = count(packets_in_window) / effective_window_seconds`
+       - If the capture session has been running for less than 60 seconds, the 
+         elapsed session duration is used as the divisor (minimum 1.0 second) 
+         to prevent initial rate distortion.
+
+C. HOST DIRECTIONALITY ACCOUNTING (TX vs. RX)
+   * When a unicast packet travels across the network from Host A (10.0.0.1) to 
+     Host B (10.0.0.2):
+       - Host A is the transmitter -> Increments Host A's `tx_bytes`.
+       - Host B is the receiver    -> Increments Host B's `rx_bytes`.
+   * Result: The single packet contributes to both Host A's TX and Host B's RX.
+   * Important Networking Principle: The sum of all host transmitted and 
+     received bytes across the subnet will roughly equal TWICE the actual 
+     wire byte count for ordinary unicast communications. The analyzer 
+     explicitly documents this distinction so host totals are not confused 
+     with physical network throughput.
+
+
+7. COMPARISON WITH INDUSTRIAL TOOLS
+--------------------------------------------------------------------------------
+1. Versus Wireshark:
+   - Wireshark is designed for deep forensic dissection of individual packets 
+     down to raw hex bytes. It stores full packet dumps in memory, which 
+     quickly exhausts RAM under continuous live monitoring.
+   - This Analyzer is designed as an operations monitor and educational IDS. 
+     It operates with zero payload storage, bounds its memory using fixed ring 
+     buffers, computes moving-window statistics automatically, and detects 
+     attacks without requiring manual filter queries.
+
+2. Versus Snort / Suricata:
+   - Snort and Suricata use large pattern-matching signature engines (often 
+     matching regular expressions against packet payloads) and complex rule 
+     languages.
+   - This Analyzer implements deterministic, stateful transport-layer heuristic 
+     algorithms focused on traffic rate, port diversity, and MAC address 
+     conflicts, making the detection logic transparent, explainable, and ideal 
+     for computer networking study.
+
+
+8. SUMMARY FOR VIVA & DEMONSTRATION QUESTIONS
+--------------------------------------------------------------------------------
+Q: How does the analyzer capture packets without interrupting network traffic?
+A: It uses the OS socket layer (AF_PACKET on Linux or BPF on macOS) in 
+   promiscuous mode. The NIC makes a duplicate copy of the frame from the 
+   hardware ring buffer and passes it to the kernel network stack, allowing 
+   the tool to passively observe traffic while normal routing continues.
+
+Q: Why doesn't the analyzer inspect packet payloads?
+A: For two major reasons:
+   1. Privacy & Compliance: Raw packet payloads may contain personal messages, 
+      passwords, or confidential data.
+   2. Modern Reality & Efficiency: Most internet traffic today is encrypted 
+      using TLS 1.3 or QUIC, meaning payloads are ciphertext. Security anomaly 
+      detection at the transport layer relies on header behavior (ports, flags, 
+      rates, and MAC mappings), which is unencrypted and significantly faster 
+      to process.
+
+Q: How does the system prevent memory leaks during long capture sessions?
+A: Every collection is strictly bounded:
+   - Rolling metrics use deques that pop entries older than the window.
+   - The top talkers table caps tracking at 1,000 hosts with LRU eviction.
+   - Recent packet history uses a 100-packet circular ring buffer.
+   - The alert store caps storage at 500 alerts with FIFO eviction and 
+     30-second deduplication cooldowns.
+
+Q: What is the difference between a TCP port scan and a SYN flood?
+A: A port scan distributes bare SYNs across many DIFFERENT PORTS on a target 
+   to map open services (horizontal/vertical scan). A SYN flood sends a rapid 
+   BURST of bare SYNs to a SINGLE PORT (or few ports) to overwhelm the operating 
+   system's connection backlog queue and deny service to legitimate users.
+
+================================================================================
+                                 END OF GUIDE
+================================================================================

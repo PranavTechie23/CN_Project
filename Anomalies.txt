@@ -1,0 +1,112 @@
+================================================================================
+          ANOMALY DETECTION TEST COMMANDS (Targeting en0 / Wi-Fi)
+================================================================================
+
+Target Host IP:   10.32.175.124
+Target Interface: en0
+
+All commands inject raw Layer 2 Ethernet frames directly onto en0 using Scapy.
+Make sure packet capture is active on interface 'en0' in the dashboard at:
+http://localhost:5173
+
+--------------------------------------------------------------------------------
+Command 1: TCP Port Scan (Rule A - Layer 4)
+--------------------------------------------------------------------------------
+Sends bare TCP SYN packets (SYN=1, ACK=0) across 20 distinct destination ports.
+Expected Alert: "Possible TCP port scan" (Rule: PORT_SCAN)
+
+sudo backend/.venv/bin/python scripts/lab/traffic_generator.py port-scan --target 10.32.175.124 --ports 1-20 --iface en0
+
+
+--------------------------------------------------------------------------------
+Command 2: TCP SYN Flood (Rule B - Layer 4)
+--------------------------------------------------------------------------------
+Sends a rapid burst of 120 bare TCP SYN packets directed at port 80 (~60 pkts/s).
+Expected Alert: "Possible SYN flood (rate heuristic)" (Rule: SYN_FLOOD)
+
+sudo backend/.venv/bin/python scripts/lab/traffic_generator.py syn-flood --target 10.32.175.124 --count 120 --rate 60 --iface en0
+
+
+--------------------------------------------------------------------------------
+Command 3: ARP Spoofing / Cache Poisoning (Rule C - Layer 2)
+--------------------------------------------------------------------------------
+Sends two conflicting gratuitous ARP announcements claiming 10.32.175.124 under
+two distinct MAC addresses within 60 seconds.
+Expected Alert: "Possible ARP spoofing" (Rule: ARP_SPOOF)
+
+sudo backend/.venv/bin/python scripts/lab/traffic_generator.py arp --target 10.32.175.124 --iface en0
+
+
+--------------------------------------------------------------------------------
+Command 4: ICMP Ping Flood (Rule D - Layer 3)
+--------------------------------------------------------------------------------
+Floods the target with a high-rate burst of 65 ICMP Echo Requests (~60 pkts/s),
+exceeding the 50 packets / 5-second heuristic threshold.
+Expected Alert: "Possible ICMP ping flood" (Rule: ICMP_FLOOD)
+
+sudo backend/.venv/bin/python scripts/lab/traffic_generator.py icmp-flood --target 10.32.175.124 --count 65 --rate 60 --iface en0
+
+
+--------------------------------------------------------------------------------
+Command 5: UDP Flood (Rule E - Layer 4)
+--------------------------------------------------------------------------------
+Sends a rapid burst of 120 UDP datagrams targeting DNS port 53 (~100 pkts/s),
+exceeding the 100 packets / 5-second heuristic threshold.
+Expected Alert: "Possible UDP flood" (Rule: UDP_FLOOD)
+
+sudo backend/.venv/bin/python scripts/lab/traffic_generator.py udp-flood --target 10.32.175.124 --count 120 --rate 100 --iface en0
+
+
+--------------------------------------------------------------------------------
+Command 6: TCP XMAS Stealth Scan (Rule F1 - Layer 4 Flag Anomaly)
+--------------------------------------------------------------------------------
+Sends TCP packets with FIN, PSH, and URG flags simultaneously lit ("lights up
+like a Christmas tree"). An RFC 793 violation used by attackers to bypass simple
+packet filters and fingerprint OS TCP stacks.
+Expected Alert: "TCP flag anomaly: XMAS scan (FIN+PSH+URG set)" (Rule: TCP_FLAG_ANOMALY)
+
+sudo backend/.venv/bin/python scripts/lab/traffic_generator.py xmas --target 10.32.175.124 --port 80 --iface en0
+
+
+--------------------------------------------------------------------------------
+Command 7: TCP NULL Stealth Scan (Rule F2 - Layer 4 Flag Anomaly)
+--------------------------------------------------------------------------------
+Sends TCP packets with ZERO control flags set. Standard TCP state transitions
+require at least one control flag. Attackers use this to probe open ports without
+establishing a connection.
+Expected Alert: "TCP flag anomaly: NULL scan (no flags set)" (Rule: TCP_FLAG_ANOMALY)
+
+sudo backend/.venv/bin/python scripts/lab/traffic_generator.py null --target 10.32.175.124 --port 80 --iface en0
+
+
+--------------------------------------------------------------------------------
+Command 8: TCP SYN-FIN Scan (Rule F3 - Layer 4 Flag Anomaly)
+--------------------------------------------------------------------------------
+Sends TCP packets with SYN and FIN flags set simultaneously. Since SYN initiates
+a connection and FIN terminates one, this combination is strictly illegal in RFC
+specifications and used in evasion attacks.
+Expected Alert: "TCP flag anomaly: SYN-FIN scan (illegal simultaneous SYN+FIN)" (Rule: TCP_FLAG_ANOMALY)
+
+sudo backend/.venv/bin/python scripts/lab/traffic_generator.py syn-fin --target 10.32.175.124 --port 80 --iface en0
+
+
+--------------------------------------------------------------------------------
+Command 9: LAND Attack (Rule G - Layer 3/4 DoS)
+--------------------------------------------------------------------------------
+Sends a spoofed TCP packet where the source IP equals the destination IP AND the
+source port equals the destination port (10.32.175.124:80 -> 10.32.175.124:80).
+Flawed TCP stacks enter an infinite loop attempting to reply to themselves.
+Expected Alert: "LAND attack detected" (Rule: LAND_ATTACK)
+
+sudo backend/.venv/bin/python scripts/lab/traffic_generator.py land --target 10.32.175.124 --port 80 --iface en0
+
+
+--------------------------------------------------------------------------------
+Control / Baseline: Benign Normal Traffic
+--------------------------------------------------------------------------------
+Sends low-rate, valid ICMP ping and UDP packets that increment packet counters
+in the dashboard but trigger ZERO alerts.
+
+sudo backend/.venv/bin/python scripts/lab/traffic_generator.py normal --target 10.32.175.124 --count 5 --iface en0
+
+================================================================================
